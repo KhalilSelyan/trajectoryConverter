@@ -1,8 +1,8 @@
-import { ExtensionContext } from "@foxglove/studio";
-import { SceneUpdate, TriangleListPrimitive } from "@foxglove/schemas";
+import { Color, SceneUpdate, TriangleListPrimitive } from "@foxglove/schemas";
 import { Duration } from "@foxglove/schemas/schemas/typescript/Duration";
 import { Pose } from "@foxglove/schemas/schemas/typescript/Pose";
 import { Time } from "@foxglove/schemas/schemas/typescript/Time";
+import { ExtensionContext } from "@foxglove/studio";
 import { setColorDependsOnVelocity } from "./utils";
 
 interface TrajectoryPoint {
@@ -30,12 +30,23 @@ interface Trajectory {
   points: TrajectoryPoint[];
 }
 
+function quadraticBezier(
+  p0: { x: number; y: number },
+  p1: { x: number; y: number },
+  p2: { x: number; y: number },
+  t: number,
+) {
+  const x = (1 - t) * (1 - t) * p0.x + 2 * (1 - t) * t * p1.x + t * t * p2.x;
+  const y = (1 - t) * (1 - t) * p0.y + 2 * (1 - t) * t * p1.y + t * t * p2.y;
+  return { x, y };
+}
 export function activate(extensionContext: ExtensionContext): void {
   extensionContext.registerMessageConverter({
     fromSchemaName: "autoware_auto_planning_msgs/msg/Trajectory",
     toSchemaName: "foxglove.SceneUpdate",
     converter: (msg: Trajectory): SceneUpdate => {
       const { points } = msg;
+      const colors: Color[] = [];
 
       const triangleList: TriangleListPrimitive = {
         pose: {
@@ -43,61 +54,47 @@ export function activate(extensionContext: ExtensionContext): void {
           orientation: { x: 0, y: 0, z: 0, w: 1 },
         },
         points: [],
-        color: { r: 0, g: 0, b: 0, a: 0 },
-        colors: [],
+        color: { r: 1, g: 0, b: 1, a: 1 },
+        colors,
         indices: [],
       };
 
-      const width = 1.25; // Rectangle's half-width
+      const width = 2; // Rectangle's half-width
 
-      for (let i = 0; i < points.length - 1; i++) {
-        const p1 = points[i]!;
-        const p2 = points[i + 1]!;
+      for (let i = 0; i < points.length - 2; i += 1) {
+        const p0 = points[i]!.pose.position; // Start point
+        const p1 = points[i + 1]?.pose.position ?? p0; // Control point
+        const p2 = points[i + 2]?.pose.position ?? p1; // End point
 
-        const color1 = setColorDependsOnVelocity(8.33, p1.longitudinal_velocity_mps);
-        const color2 = setColorDependsOnVelocity(8.33, p2.longitudinal_velocity_mps);
+        for (let t = 0; t < 1; t += 0.1) {
+          const t1 = t;
+          const t2 = t + 0.1;
 
-        const direction = {
-          x: p2.pose.position.x - p1.pose.position.x,
-          y: p2.pose.position.y - p1.pose.position.y,
-        };
+          const point1 = quadraticBezier(p0, p1, p2, t1);
+          const point2 = quadraticBezier(p0, p1, p2, t2);
 
-        const normal = {
-          x: -direction.y,
-          y: direction.x,
-        };
+          // Calculate the direction of the curve
+          const dx = point2.x - point1.x;
+          const dy = point2.y - point1.y;
+          const len = Math.sqrt(dx * dx + dy * dy);
+          const nx = (dy / len) * width;
+          const ny = (-dx / len) * width;
 
-        const length = Math.sqrt(normal.x * normal.x + normal.y * normal.y);
-        normal.x /= length;
-        normal.y /= length;
+          triangleList.points.push(
+            { x: point1.x + nx, y: point1.y + ny, z: p0.z + 0.15 },
+            { x: point1.x - nx, y: point1.y - ny, z: p0.z + 0.15 },
+            { x: point2.x + nx, y: point2.y + ny, z: p0.z + 0.15 },
+            { x: point2.x - nx, y: point2.y - ny, z: p0.z + 0.15 },
+          );
 
-        const corners = [
-          {
-            x: p1.pose.position.x + normal.x * width,
-            y: p1.pose.position.y + normal.y * width,
-            z: p1.pose.position.z + 0.1,
-          },
-          {
-            x: p1.pose.position.x - normal.x * width,
-            y: p1.pose.position.y - normal.y * width,
-            z: p1.pose.position.z + 0.1,
-          },
-          {
-            x: p2.pose.position.x + normal.x * width,
-            y: p2.pose.position.y + normal.y * width,
-            z: p2.pose.position.z + 0.1,
-          },
-          {
-            x: p2.pose.position.x - normal.x * width,
-            y: p2.pose.position.y - normal.y * width,
-            z: p2.pose.position.z + 0.1,
-          },
-        ];
+          colors.push(setColorDependsOnVelocity(3, points[i]!.longitudinal_velocity_mps));
+          colors.push(
+            setColorDependsOnVelocity(3, (points[i + 1] ?? points[i]!).longitudinal_velocity_mps),
+          );
 
-        triangleList.points.push(...corners);
-        triangleList.colors.push(color1, color1, color2, color2);
-
-        triangleList.indices.push(0 + i * 4, 1 + i * 4, 2 + i * 4, 1 + i * 4, 2 + i * 4, 3 + i * 4);
+          const idx = triangleList.points.length - 4;
+          triangleList.indices.push(idx, idx + 1, idx + 2, idx + 1, idx + 2, idx + 3);
+        }
       }
 
       const sceneUpdate: SceneUpdate = {
